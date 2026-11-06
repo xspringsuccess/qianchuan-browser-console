@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light"><meta name="description" content="千川本机网页执行器独立控制台">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src http://127.0.0.1:8798; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+  <title>千川网页规则台 · 独立浏览器版</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml"><link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.js"></script>
+</head><body>
+  <aside><div class="brand"><span>川</span><div>千川网页规则台<small>BROWSER EXECUTOR</small></div></div>
+    <nav><a class="active" href="#status">运行状态</a><a href="#rules">自定义规则</a><a href="#activity">执行记录</a></nav>
+    <div class="isolation"><b>GitHub Pages 静态版</b><small>账户数据只在本机</small></div>
+  </aside>
+  <main><header><div><small>GitHub Pages + 本机执行器</small><h1>电脑在线时，按你的规则执行</h1></div><span class="pill">只读验证阶段</span></header><div id="content">正在初始化…</div></main>
+  <dialog id="dialog"></dialog><div id="toast" hidden></div>
+</body></html>

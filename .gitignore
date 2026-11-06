@@ -1,0 +1,7 @@
+.local/
+.wrangler/
+.dev.vars*
+.env*
+*.log
+*.sqlite*
+node_modules/
