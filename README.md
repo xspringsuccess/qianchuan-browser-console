@@ -9,7 +9,8 @@
 - 独立目录：`E:\codex\千川网页执行器`
 - 独立公开 GitHub Pages 仓库：`qianchuan-browser-console`
 - 不使用 Cloudflare Worker、D1 或 GitHub OAuth App
-- 独立本机配置与浏览器用户目录：`.local/`
+- 独立本机数据库：`.local/`
+- 独立浏览器用户目录：`%LOCALAPPDATA%\QianchuanBrowserConsole\`
 - 不读取或修改 `E:\codex\千川`，不复用其数据库、授权或真实写入开关
 
 ## 本地验证

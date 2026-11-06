@@ -7,8 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { LocalD1 } from './sqlite.mjs';
 import { createLocalApi } from '../src/local-api.mjs';
 
-const VERSION='0.2.0',root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+const VERSION='0.2.1',root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const localDir=resolve(root,'.local');
+const browserDataRoot=resolve(process.env.LOCALAPPDATA||localDir,'QianchuanBrowserConsole');
 let profileDir;
 const pagesOrigin='https://xspringsuccess.github.io',dashboardUrl=`${pagesOrigin}/qianchuan-browser-console/`;
 const devOrigin='http://127.0.0.1:8797',port=8798,startUrl=process.env.QIANCHUAN_START_URL||'https://qianchuan.jinritemai.com/';
@@ -19,18 +20,18 @@ async function findBrowser(){const candidates=[process.env.QIANCHUAN_BROWSER_PAT
 async function devtoolsPort(){const path=resolve(profileDir,'DevToolsActivePort');for(let attempt=0;attempt<120;attempt++){try{const [value]=String(await readFile(path,'utf8')).split(/\r?\n/);if(/^\d+$/.test(value))return Number(value);}catch{}await sleep(100);}throw new Error('专用浏览器启动超时');}
 async function browserState(debugPort){try{const response=await fetch(`http://127.0.0.1:${debugPort}/json/list`),targets=await response.json(),pages=targets.filter(target=>target.type==='page');const page=pages.find(target=>{try{const host=new URL(target.url).hostname;return host==='qianchuan.jinritemai.com'||host.endsWith('.oceanengine.com');}catch{return false;}});if(!page)return pages.some(item=>item.url&&item.url!=='about:blank')?'outside_qianchuan':'browser_open';return /login|passport|sso|登录/i.test(`${page.url} ${page.title||''}`)?'login_required':'qianchuan_open';}catch{return 'browser_closed';}}
 
-await mkdir(localDir,{recursive:true});const db=new LocalD1(resolve(localDir,'browser.sqlite'));for(const file of(await readdir(resolve(root,'migrations'))).filter(name=>name.endsWith('.sql')).sort())db.raw.exec(await readFile(resolve(root,'migrations',file),'utf8'));
+await mkdir(localDir,{recursive:true});await mkdir(browserDataRoot,{recursive:true});const db=new LocalD1(resolve(localDir,'browser.sqlite'));for(const file of(await readdir(resolve(root,'migrations'))).filter(name=>name.endsWith('.sql')).sort())db.raw.exec(await readFile(resolve(root,'migrations',file),'utf8'));
 const executable=await findBrowser(),browserName=basename(executable).toLowerCase().includes('edge')?'Microsoft Edge':'Google Chrome';
-profileDir=resolve(localDir,browserName==='Microsoft Edge'?'edge-profile':'chrome-profile');
+profileDir=resolve(browserDataRoot,browserName==='Microsoft Edge'?'edge-profile':'chrome-profile');
 try{await unlink(resolve(profileDir,'DevToolsActivePort'));}catch(error){if(error.code!=='ENOENT')throw error;}
-const child=spawn(executable,[`--user-data-dir=${profileDir}`,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=0','--disable-gpu','--no-first-run','--no-default-browser-check','--new-window',`${dashboardUrl}#token=${token}`,startUrl],{stdio:'ignore'});
-child.on('exit',(code,signal)=>{if(!stopping)console.error(`${browserName} 已退出：code=${code} signal=${signal||'none'}`);});
+let stopping=false,misses=0,browserExited=false;
+const child=spawn(executable,[`--user-data-dir=${profileDir}`,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=0','--disable-gpu','--no-first-run','--no-default-browser-check','--new-window',`${dashboardUrl}#token=${token}`,startUrl],{stdio:'inherit'});
+child.on('exit',(code,signal)=>{browserExited=true;if(!stopping)console.error(`${browserName} 启动失败或已退出：code=${code} signal=${signal||'none'}`);});
 let debugPort;try{debugPort=await devtoolsPort();}catch(error){child.kill();throw error;}
 const api=createLocalApi({db,token,allowedOrigins:new Set([pagesOrigin,devOrigin,'http://localhost:8797']),getBrowserState:()=>browserState(debugPort)});
 const server=createServer(async(req,res)=>{try{const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>16384){res.writeHead(413);res.end();return;}chunks.push(chunk);}const request=new Request(`http://127.0.0.1:${port}${req.url}`,{method:req.method,headers:req.headers,body:['GET','HEAD','OPTIONS'].includes(req.method)?undefined:Buffer.concat(chunks)});const response=await api(request);res.writeHead(response.status,Object.fromEntries(response.headers));res.end(Buffer.from(await response.arrayBuffer()));}catch{res.writeHead(500,{'Content-Type':'application/json'});res.end('{"error":"本机执行器异常"}');}});
 server.listen(port,'127.0.0.1',()=>{console.log(`千川网页执行器 ${VERSION} 已启动`);console.log(`浏览器：${browserName}`);console.log('看板只连接本机 127.0.0.1，关闭专用浏览器窗口即可停止。');});
-let stopping=false,misses=0;
 const stop=()=>{if(stopping)return;stopping=true;clearInterval(browserWatch);server.close();if(child.exitCode===null)child.kill();};
-const browserWatch=setInterval(async()=>{try{const response=await fetch(`http://127.0.0.1:${debugPort}/json/version`);if(!response.ok)throw new Error(`HTTP ${response.status}`);misses=0;}catch(error){misses+=1;console.error(`浏览器连接检查失败 ${misses}/5：${error.message}`);if(misses>=5){stop();process.exit(0);}}},3000);
+const browserWatch=setInterval(async()=>{try{const response=await fetch(`http://127.0.0.1:${debugPort}/json/version`);if(!response.ok)throw new Error(`HTTP ${response.status}`);misses=0;}catch(error){misses+=1;console.error(`浏览器连接检查失败 ${misses}/5：${error.message}`);if(misses>=5){console.error('专用浏览器无法保持运行，请保留此窗口并截图最后几行。');stop();process.exit(browserExited?2:3);}}},3000);
 browserWatch.unref();
 process.on('SIGINT',()=>{stop();process.exit(0);});process.on('SIGTERM',()=>{stop();process.exit(0);});
