@@ -94,7 +94,31 @@ document.addEventListener('click',async event=>{
   catch(error){toast(error.message);await connect();}
   finally{button.disabled=false;button.textContent=label;}
 });
-function ruleDialog(){const options=(scope)=>scope==='account'?(state.accounts||[]).map(item=>`<option value="${esc(item.account_id)}">${esc(item.label)}</option>`).join(''):(state.plans||[]).map(item=>`<option value="${esc(item.plan_id)}">${esc(item.name)} · ${esc(item.plan_id.slice(-4))}</option>`).join('');$('#dialog').innerHTML=`<h2>新增规则草稿</h2><p>草稿只保存在本机，并强制保持未启用。</p><form id="rule-form"><label>规则名称<input name="name" value="账户预算自动追加" maxlength="100" required></label><div class="form-row"><label>层级<select name="target_scope"><option value="account">账户</option><option value="plan">计划</option></select></label><label>目标<select name="target_id" required>${options('account')}</select></label></div><div class="form-row"><label>预算使用率（%）<input name="progress" type="number" value="95" min="0.01" max="100" step="0.01"></label><label>净 ROI 严格大于<input name="roi" type="number" value="2.5" min="0" step="0.01"></label></div><div class="form-row"><label>追加预算（元）<input name="increment" type="number" value="1000" min="0.01" step="0.01"></label><label>冷却时间（分钟）<input name="cooldown_minutes" type="number" value="5" min="1"></label></div><div class="actions"><button type="button" data-action="close">取消</button><button class="primary" type="submit">保存未启用草稿</button></div></form>`;$('#dialog').showModal();const form=$('#rule-form');form.target_scope.addEventListener('change',()=>form.target_id.innerHTML=options(form.target_scope.value));form.addEventListener('submit',async event=>{event.preventDefault();const data=Object.fromEntries(new FormData(event.target));data.action='increase_budget';data.enabled=false;try{await api('rules',data);$('#dialog').close();await connect();toast('规则草稿已保存到本机');}catch(error){toast(error.message);}});}
+function ruleDialog(){
+  const accounts=state.accounts||[],plans=state.plans||[];
+  const accountOptions=accounts.map(item=>`<option value="${esc(item.account_id)}">${esc(item.label)}</option>`).join('');
+  const plansFor=accountId=>plans.filter(item=>item.account_id===accountId);
+  const planOptions=accountId=>{
+    const matches=plansFor(accountId);
+    return matches.length?matches.map(item=>`<option value="${esc(item.plan_id)}">${esc(item.name)} · ${esc(item.plan_id.slice(-4))}</option>`).join(''):'<option value="" disabled>此账户还没有已同步的计划</option>';
+  };
+  const firstAccount=accounts[0]?.account_id||'';
+  $('#dialog').innerHTML=`<h2>新增规则草稿</h2><p>草稿只保存在本机，并强制保持未启用。</p><form id="rule-form"><label>规则名称<input name="name" value="账户预算自动追加" maxlength="100" required></label><label>层级<select name="target_scope"><option value="account">账户</option><option value="plan">计划</option></select></label><div class="form-row" id="account-target-row"><label>账户<select name="target_id" id="account-target" required>${accountOptions}</select></label></div><div class="form-row" id="plan-target-row" hidden><label>账户<select name="plan_account_id" id="plan-account-target">${accountOptions}</select></label><label>计划<select name="target_id" id="plan-target" required>${planOptions(firstAccount)}</select></label></div><div class="form-row"><label>预算使用率（%）<input name="progress" type="number" value="95" min="0.01" max="100" step="0.01"></label><label>净 ROI 严格大于<input name="roi" type="number" value="2.5" min="0" step="0.01"></label></div><div class="form-row"><label>追加预算（元）<input name="increment" type="number" value="1000" min="0.01" step="0.01"></label><label>冷却时间（分钟）<input name="cooldown_minutes" type="number" value="5" min="1"></label></div><div class="actions"><button type="button" data-action="close">取消</button><button class="primary" type="submit">保存未启用草稿</button></div></form>`;
+  $('#dialog').showModal();
+  const form=$('#rule-form'),scope=form.elements.target_scope,accountRow=$('#account-target-row'),planRow=$('#plan-target-row'),accountTarget=$('#account-target'),planAccount=$('#plan-account-target'),planTarget=$('#plan-target');
+  const updateScope=()=>{
+    const isPlan=scope.value==='plan';
+    accountRow.hidden=isPlan;
+    planRow.hidden=!isPlan;
+    accountTarget.disabled=isPlan;
+    planAccount.disabled=!isPlan;
+    planTarget.disabled=!isPlan;
+  };
+  scope.addEventListener('change',updateScope);
+  planAccount.addEventListener('change',()=>{planTarget.innerHTML=planOptions(planAccount.value);});
+  updateScope();
+  form.addEventListener('submit',async event=>{event.preventDefault();const data=Object.fromEntries(new FormData(event.target));delete data.plan_account_id;data.action='increase_budget';data.enabled=false;try{await api('rules',data);$('#dialog').close();await connect();toast('规则草稿已保存到本机');}catch(error){toast(error.message);}});
+}
 document.addEventListener('click',async event=>{const button=event.target.closest('[data-action]');if(!button)return;if(button.dataset.action==='connect'||button.dataset.action==='refresh')await connect();if(button.dataset.action==='plan-prev'){planPage=Math.max(1,planPage-1);render();renderPreviews();}if(button.dataset.action==='plan-next'){planPage+=1;render();renderPreviews();}if(button.dataset.action==='sync'){button.disabled=true;button.textContent='同步中…';try{const result=await api('sync',{});await connect();toast(`已同步 ${result.accounts} 个账户、${result.plans} 条计划`);}catch(error){toast(error.message);}finally{button.disabled=false;button.textContent='同步只读数据';}}if(button.dataset.action==='new-rule')ruleDialog();if(button.dataset.action==='close')$('#dialog').close();});
 if(token){connect();setInterval(()=>connect(),15000);}else disconnected();
 
