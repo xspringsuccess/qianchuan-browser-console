@@ -1,4 +1,4 @@
-import {evaluateRule,findRuleTarget,SNAPSHOT_MAX_AGE_MS} from './rule-engine.mjs';
+import {ACCOUNT_SCOPE_UNVERIFIED,evaluateRule,findRuleTarget,SNAPSHOT_MAX_AGE_MS} from './rule-engine.mjs';
 const json=(value,status,headers)=>new Response(JSON.stringify(value),{status,headers:{...headers,'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'}});
 const actions=new Set(['increase_budget','enable','disable']);
 const scopes=new Set(['account','plan']);
@@ -18,10 +18,23 @@ export function createLocalApi({db,token,allowedOrigins,getBrowserState,syncSnap
       const execution=db.raw.prepare("SELECT value FROM settings WHERE key='execution'").get();
       const rules=db.raw.prepare('SELECT * FROM browser_rules ORDER BY updated_at DESC').all().map(rule=>({...rule,config:JSON.parse(rule.config_json)}));
       const recent=db.raw.prepare('SELECT * FROM browser_actions ORDER BY created_at DESC LIMIT 50').all();
-      const accounts=db.raw.prepare('SELECT * FROM browser_accounts ORDER BY captured_at DESC').all();
+      const accounts=db.raw.prepare('SELECT * FROM browser_accounts_with_scope ORDER BY captured_at DESC').all();
       const plans=db.raw.prepare('SELECT * FROM browser_plans ORDER BY account_id,name').all();
-      const evaluations=db.raw.prepare('SELECT * FROM browser_rule_evaluations ORDER BY created_at DESC LIMIT 100').all().map(item=>({...item,proposed_action:item.proposed_action?JSON.parse(item.proposed_action):null}));
-      const previews=db.raw.prepare('SELECT * FROM browser_previews ORDER BY created_at DESC LIMIT 50').all().map(item=>{const rule=rules.find(rule=>rule.id===item.rule_id),payload=JSON.parse(item.payload_json),target=rule&&findRuleTarget(db,rule);const effective_state=item.state==='cancelled'?'cancelled':!rule||rule.updated_at!==item.rule_updated_at?'superseded':Date.parse(item.expires_at)<=Date.now()?'expired':target?.captured_at!==payload.captured_at?'superseded':'pending_review';return {...item,payload_json:undefined,payload,effective_state};});
+      const evaluations=db.raw.prepare('SELECT * FROM browser_rule_evaluations ORDER BY created_at DESC LIMIT 100').all().map(item=>{
+        const account=accounts.find(account=>account.account_id===item.target_id);
+        if(item.target_scope==='account'&&account?.metrics_scope!=='whole_account')return {...item,matched:0,reason:ACCOUNT_SCOPE_UNVERIFIED,proposed_action:null};
+        return {...item,proposed_action:item.proposed_action?JSON.parse(item.proposed_action):null};
+      });
+      const previews=db.raw.prepare('SELECT * FROM browser_previews ORDER BY created_at DESC LIMIT 50').all().map(item=>{
+        const rule=rules.find(rule=>rule.id===item.rule_id),payload=JSON.parse(item.payload_json),target=rule&&findRuleTarget(db,rule);
+        let effective_state=item.state;
+        if(item.state==='pending_review'){
+          if(Date.parse(item.expires_at)<=Date.now())effective_state='expired';
+          else if(!rule||rule.updated_at!==item.rule_updated_at||target?.captured_at!==payload.captured_at)effective_state='superseded';
+          else if(rule.target_scope==='account'&&target.metrics_scope!=='whole_account')effective_state='scope_unverified';
+        }
+        return {...item,payload_json:undefined,payload,effective_state};
+      });
       return json({product:'browser_executor',execution:JSON.parse(execution.value),browser_state:await getBrowserState(),rules,actions:recent,accounts,plans,evaluations,previews,live_writes:false,storage:'local_sqlite'},200,headers);
     }
     if(request.method==='POST'&&path==='/api/sync')return json(await sync(),200,headers);
