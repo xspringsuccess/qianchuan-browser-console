@@ -8,8 +8,9 @@ import { LocalD1 } from './sqlite.mjs';
 import { CdpClient } from './cdp.mjs';
 import { createLocalApi } from '../src/local-api.mjs';
 import { collectQianchuanSnapshots } from '../src/qianchuan-collector.mjs';
+import { evaluateRule } from '../src/rule-engine.mjs';
 
-const VERSION='0.3.0',root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+const VERSION='0.4.0',root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const localDir=resolve(root,'.local');
 const browserDataRoot=resolve(process.env.LOCALAPPDATA||localDir,'QianchuanBrowserConsole');
 let profileDir;
@@ -35,7 +36,7 @@ async function syncSnapshot(){
   db.raw.exec('BEGIN');
   try{
     for(const snapshot of snapshots){const account=snapshot.account;db.raw.prepare('INSERT INTO browser_accounts(account_id,label,budget,spend,net_roi,progress,delivery_status,captured_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET label=excluded.label,budget=excluded.budget,spend=excluded.spend,net_roi=excluded.net_roi,progress=excluded.progress,delivery_status=excluded.delivery_status,captured_at=excluded.captured_at').run(account.account_id,account.label,account.budget,account.spend,account.net_roi,account.progress,account.delivery_status,account.captured_at);db.raw.prepare('DELETE FROM browser_plans WHERE account_id=?').run(account.account_id);for(const plan of snapshot.plans)db.raw.prepare('INSERT INTO browser_plans(plan_id,account_id,name,budget,spend,net_roi,progress,status,budget_editable,status_editable,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(plan.plan_id,plan.account_id,plan.name,plan.budget,plan.spend,plan.net_roi,plan.progress,plan.status,plan.budget_editable,plan.status_editable,plan.captured_at);}
-    for(const rule of rules){const config=JSON.parse(rule.config_json),target=rule.target_scope==='account'?snapshots.map(item=>item.account).find(item=>item.account_id===rule.target_id):snapshots.flatMap(item=>item.plans).find(item=>item.plan_id===rule.target_id);const ready=Boolean(target&&target.progress!==null&&target.net_roi!==null),matched=Boolean(ready&&target.progress>=config.progress&&target.net_roi>config.roi),reason=!target?'未找到目标':!ready?'目标指标不完整':matched?`预算进度 ${target.progress.toFixed(2)}%，净 ROI ${target.net_roi.toFixed(2)}，命中规则`:`预算进度 ${target.progress?.toFixed(2)??'--'}%，净 ROI ${target.net_roi?.toFixed(2)??'--'}，未命中规则`,proposal=matched?JSON.stringify({action:rule.action,increment:config.increment,current_budget:target.budget,new_budget:(target.budget||0)+config.increment}):null;db.raw.prepare('INSERT INTO browser_rule_evaluations(id,rule_id,target_scope,target_id,matched,reason,proposed_action,created_at) VALUES(?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),rule.id,rule.target_scope,rule.target_id,matched?1:0,reason,proposal,now);}
+    for(const rule of rules){const target=rule.target_scope==='account'?snapshots.map(item=>item.account).find(item=>item.account_id===rule.target_id):snapshots.flatMap(item=>item.plans).find(item=>item.plan_id===rule.target_id),evaluation=evaluateRule(rule,target);db.raw.prepare('INSERT INTO browser_rule_evaluations(id,rule_id,target_scope,target_id,matched,reason,proposed_action,created_at) VALUES(?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),rule.id,rule.target_scope,rule.target_id,evaluation.matched?1:0,evaluation.reason,evaluation.proposed_action?JSON.stringify(evaluation.proposed_action):null,now);}
     db.raw.prepare('DELETE FROM browser_rule_evaluations WHERE id NOT IN (SELECT id FROM browser_rule_evaluations ORDER BY created_at DESC LIMIT 200)').run();db.raw.exec('COMMIT');
   }catch(error){db.raw.exec('ROLLBACK');throw error;}
   return {accounts:snapshots.length,plans:snapshots.reduce((sum,item)=>sum+item.plans.length,0),captured_at:now,live_writes:false};

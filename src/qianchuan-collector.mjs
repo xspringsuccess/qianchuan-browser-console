@@ -2,7 +2,7 @@ import { CdpClient } from '../scripts/cdp.mjs';
 
 const sleep=ms=>new Promise(done=>setTimeout(done,ms));
 const watchedPath=/daily-budget\/get-account-budget|uni-promotion\/ad\/list-required|data\/v1\/common\/statQuery/;
-const number=value=>{const parsed=Number(value);return Number.isFinite(parsed)?parsed:null;};
+const number=value=>{if(value===null||value===undefined||typeof value==='boolean'||typeof value==='string'&&!value.trim())return null;const parsed=Number(value);return Number.isFinite(parsed)?parsed:null;};
 const yuan=value=>{const parsed=number(value);return parsed===null?null:parsed/100000;};
 const metric=(metrics,key)=>number(metrics?.[key]?.value??metrics?.[key]?.Value);
 
