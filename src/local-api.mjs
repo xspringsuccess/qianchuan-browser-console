@@ -2,7 +2,7 @@ const json=(value,status,headers)=>new Response(JSON.stringify(value),{status,he
 const actions=new Set(['increase_budget','enable','disable']);
 const scopes=new Set(['account','plan']);
 
-export function createLocalApi({db,token,allowedOrigins,getBrowserState}){
+export function createLocalApi({db,token,allowedOrigins,getBrowserState,syncSnapshot=async()=>({accounts:0,plans:0,live_writes:false})}){
   const cors=origin=>({'Access-Control-Allow-Origin':origin,'Access-Control-Allow-Methods':'GET, POST, OPTIONS','Access-Control-Allow-Headers':'Authorization, Content-Type','Access-Control-Max-Age':'600','Vary':'Origin'});
   return async request=>{
     const origin=request.headers.get('Origin')||'',allowed=allowedOrigins.has(origin),headers=allowed?cors(origin):{};
@@ -14,8 +14,12 @@ export function createLocalApi({db,token,allowedOrigins,getBrowserState}){
       const execution=db.raw.prepare("SELECT value FROM settings WHERE key='execution'").get();
       const rules=db.raw.prepare('SELECT * FROM browser_rules ORDER BY updated_at DESC').all().map(rule=>({...rule,config:JSON.parse(rule.config_json)}));
       const recent=db.raw.prepare('SELECT * FROM browser_actions ORDER BY created_at DESC LIMIT 50').all();
-      return json({product:'browser_executor',execution:JSON.parse(execution.value),browser_state:await getBrowserState(),rules,actions:recent,live_writes:false,storage:'local_sqlite'},200,headers);
+      const accounts=db.raw.prepare('SELECT * FROM browser_accounts ORDER BY captured_at DESC').all();
+      const plans=db.raw.prepare('SELECT * FROM browser_plans ORDER BY account_id,name').all();
+      const evaluations=db.raw.prepare('SELECT * FROM browser_rule_evaluations ORDER BY created_at DESC LIMIT 100').all().map(item=>({...item,proposed_action:item.proposed_action?JSON.parse(item.proposed_action):null}));
+      return json({product:'browser_executor',execution:JSON.parse(execution.value),browser_state:await getBrowserState(),rules,actions:recent,accounts,plans,evaluations,live_writes:false,storage:'local_sqlite'},200,headers);
     }
+    if(request.method==='POST'&&path==='/api/sync')return json(await syncSnapshot(),200,headers);
     if(request.method==='POST'&&path==='/api/rules'){
       const text=await request.text();if(text.length>8192)return json({error:'请求过大'},413,headers);
       let data;try{data=JSON.parse(text);}catch{return json({error:'请求不是有效 JSON'},400,headers);}

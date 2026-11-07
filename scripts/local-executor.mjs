@@ -5,9 +5,11 @@ import { constants } from 'node:fs';
 import { basename,dirname,resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LocalD1 } from './sqlite.mjs';
+import { CdpClient } from './cdp.mjs';
 import { createLocalApi } from '../src/local-api.mjs';
+import { collectQianchuanSnapshots } from '../src/qianchuan-collector.mjs';
 
-const VERSION='0.2.1',root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+const VERSION='0.3.0',root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const localDir=resolve(root,'.local');
 const browserDataRoot=resolve(process.env.LOCALAPPDATA||localDir,'QianchuanBrowserConsole');
 let profileDir;
@@ -28,10 +30,20 @@ let stopping=false,misses=0,browserExited=false;
 const child=spawn(executable,[`--user-data-dir=${profileDir}`,'--remote-debugging-address=127.0.0.1','--remote-debugging-port=0','--disable-gpu','--no-first-run','--no-default-browser-check','--new-window',`${dashboardUrl}#token=${token}`,startUrl],{stdio:'inherit'});
 child.on('exit',(code,signal)=>{browserExited=true;if(!stopping)console.error(`${browserName} 启动失败或已退出：code=${code} signal=${signal||'none'}`);});
 let debugPort;try{debugPort=await devtoolsPort();}catch(error){child.kill();throw error;}
-const api=createLocalApi({db,token,allowedOrigins:new Set([pagesOrigin,devOrigin,'http://localhost:8797']),getBrowserState:()=>browserState(debugPort)});
-const server=createServer(async(req,res)=>{try{const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>16384){res.writeHead(413);res.end();return;}chunks.push(chunk);}const request=new Request(`http://127.0.0.1:${port}${req.url}`,{method:req.method,headers:req.headers,body:['GET','HEAD','OPTIONS'].includes(req.method)?undefined:Buffer.concat(chunks)});const response=await api(request);res.writeHead(response.status,Object.fromEntries(response.headers));res.end(Buffer.from(await response.arrayBuffer()));}catch{res.writeHead(500,{'Content-Type':'application/json'});res.end('{"error":"本机执行器异常"}');}});
+async function syncSnapshot(){
+  const snapshots=await collectQianchuanSnapshots(debugPort),rules=db.raw.prepare('SELECT * FROM browser_rules').all(),now=new Date().toISOString();
+  db.raw.exec('BEGIN');
+  try{
+    for(const snapshot of snapshots){const account=snapshot.account;db.raw.prepare('INSERT INTO browser_accounts(account_id,label,budget,spend,net_roi,progress,delivery_status,captured_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET label=excluded.label,budget=excluded.budget,spend=excluded.spend,net_roi=excluded.net_roi,progress=excluded.progress,delivery_status=excluded.delivery_status,captured_at=excluded.captured_at').run(account.account_id,account.label,account.budget,account.spend,account.net_roi,account.progress,account.delivery_status,account.captured_at);db.raw.prepare('DELETE FROM browser_plans WHERE account_id=?').run(account.account_id);for(const plan of snapshot.plans)db.raw.prepare('INSERT INTO browser_plans(plan_id,account_id,name,budget,spend,net_roi,progress,status,budget_editable,status_editable,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(plan.plan_id,plan.account_id,plan.name,plan.budget,plan.spend,plan.net_roi,plan.progress,plan.status,plan.budget_editable,plan.status_editable,plan.captured_at);}
+    for(const rule of rules){const config=JSON.parse(rule.config_json),target=rule.target_scope==='account'?snapshots.map(item=>item.account).find(item=>item.account_id===rule.target_id):snapshots.flatMap(item=>item.plans).find(item=>item.plan_id===rule.target_id);const ready=Boolean(target&&target.progress!==null&&target.net_roi!==null),matched=Boolean(ready&&target.progress>=config.progress&&target.net_roi>config.roi),reason=!target?'未找到目标':!ready?'目标指标不完整':matched?`预算进度 ${target.progress.toFixed(2)}%，净 ROI ${target.net_roi.toFixed(2)}，命中规则`:`预算进度 ${target.progress?.toFixed(2)??'--'}%，净 ROI ${target.net_roi?.toFixed(2)??'--'}，未命中规则`,proposal=matched?JSON.stringify({action:rule.action,increment:config.increment,current_budget:target.budget,new_budget:(target.budget||0)+config.increment}):null;db.raw.prepare('INSERT INTO browser_rule_evaluations(id,rule_id,target_scope,target_id,matched,reason,proposed_action,created_at) VALUES(?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),rule.id,rule.target_scope,rule.target_id,matched?1:0,reason,proposal,now);}
+    db.raw.prepare('DELETE FROM browser_rule_evaluations WHERE id NOT IN (SELECT id FROM browser_rule_evaluations ORDER BY created_at DESC LIMIT 200)').run();db.raw.exec('COMMIT');
+  }catch(error){db.raw.exec('ROLLBACK');throw error;}
+  return {accounts:snapshots.length,plans:snapshots.reduce((sum,item)=>sum+item.plans.length,0),captured_at:now,live_writes:false};
+}
+const api=createLocalApi({db,token,allowedOrigins:new Set([pagesOrigin,devOrigin,'http://localhost:8797']),getBrowserState:()=>browserState(debugPort),syncSnapshot});
+const server=createServer(async(req,res)=>{try{const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>16384){res.writeHead(413);res.end();return;}chunks.push(chunk);}const request=new Request(`http://127.0.0.1:${port}${req.url}`,{method:req.method,headers:req.headers,body:['GET','HEAD','OPTIONS'].includes(req.method)?undefined:Buffer.concat(chunks)});const response=await api(request);res.writeHead(response.status,Object.fromEntries(response.headers));res.end(Buffer.from(await response.arrayBuffer()));}catch(error){console.error('本机接口异常：',error);res.writeHead(500,{'Content-Type':'application/json'});res.end('{"error":"本机执行器异常"}');}});
 server.listen(port,'127.0.0.1',()=>{console.log(`千川网页执行器 ${VERSION} 已启动`);console.log(`浏览器：${browserName}`);console.log('看板只连接本机 127.0.0.1，关闭专用浏览器窗口即可停止。');});
-const stop=()=>{if(stopping)return;stopping=true;clearInterval(browserWatch);server.close();if(child.exitCode===null)child.kill();};
-const browserWatch=setInterval(async()=>{try{const response=await fetch(`http://127.0.0.1:${debugPort}/json/version`);if(!response.ok)throw new Error(`HTTP ${response.status}`);misses=0;}catch(error){misses+=1;console.error(`浏览器连接检查失败 ${misses}/5：${error.message}`);if(misses>=5){console.error('专用浏览器无法保持运行，请保留此窗口并截图最后几行。');stop();process.exit(browserExited?2:3);}}},3000);
+const stop=async({closeBrowser=true}={})=>{if(stopping)return;stopping=true;clearInterval(browserWatch);await new Promise(resolve=>server.close(resolve));if(closeBrowser&&child.exitCode===null){try{const version=await (await fetch(`http://127.0.0.1:${debugPort}/json/version`)).json(),client=await new CdpClient(version.webSocketDebuggerUrl).connect();await client.send('Browser.close');client.close();await sleep(1000);}catch(error){console.error('浏览器优雅关闭失败：',error.message);child.kill();}}};
+const browserWatch=setInterval(async()=>{try{const response=await fetch(`http://127.0.0.1:${debugPort}/json/version`);if(!response.ok)throw new Error(`HTTP ${response.status}`);misses=0;}catch(error){misses+=1;console.error(`浏览器连接检查失败 ${misses}/5：${error.message}`);if(misses>=5){console.error('专用浏览器无法保持运行，请保留此窗口并截图最后几行。');await stop({closeBrowser:false});process.exit(browserExited?2:3);}}},3000);
 browserWatch.unref();
-process.on('SIGINT',()=>{stop();process.exit(0);});process.on('SIGTERM',()=>{stop();process.exit(0);});
+process.on('SIGINT',async()=>{await stop();process.exit(0);});process.on('SIGTERM',async()=>{await stop();process.exit(0);});

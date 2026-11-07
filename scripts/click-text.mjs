@@ -1,0 +1,21 @@
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { CdpClient } from './cdp.mjs';
+
+const [pathHint,label]=process.argv.slice(2);
+if(!pathHint||!label)throw new Error('usage: node scripts/click-text.mjs <path> <label>');
+const profileRoot=resolve(process.env.LOCALAPPDATA||'','QianchuanBrowserConsole','chrome-profile');
+const [port]=String(await readFile(resolve(profileRoot,'DevToolsActivePort'),'utf8')).split(/\r?\n/);
+const targets=await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+const page=targets.find(target=>target.type==='page'&&new URL(target.url).hostname==='qianchuan.jinritemai.com'&&new URL(target.url).pathname.includes(pathHint));
+if(!page)throw new Error('target page not found');
+const client=await new CdpClient(page.webSocketDebuggerUrl).connect();
+const point=await client.evaluate(`(()=>{const label=${JSON.stringify(label)};const candidates=[...document.querySelectorAll('button,a,[role=button],[role=link],[role=menuitem],[role=tab]')];const node=candidates.find(item=>(item.innerText||item.textContent||'').trim()===label)||candidates.find(item=>(item.innerText||item.textContent||'').trim().includes(label));if(!node)return null;const rect=node.getBoundingClientRect();return {x:rect.left+rect.width/2,y:rect.top+rect.height/2,text:(node.innerText||node.textContent||'').trim()}})()`);
+if(!point)throw new Error('target element not found');
+await client.send('Page.bringToFront');
+await client.send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1});
+await client.send('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1});
+await new Promise(done=>setTimeout(done,1000));
+const result=await client.evaluate(`(()=>{const unique=selector=>[...new Set([...document.querySelectorAll(selector)].map(node=>(node.innerText||node.textContent||'').trim()).filter(Boolean))].filter(value=>value.length<=100).slice(0,300);return {path:location.pathname,clicked:${JSON.stringify(label)},headings:unique('h1,h2,h3,[role=heading]'),buttons:unique('button,[role=button]'),links:unique('a,[role=link]'),menuItems:unique('[role=menuitem]'),tabs:unique('[role=tab]')}})()`);
+client.close();
+console.log(JSON.stringify(result,null,2));
