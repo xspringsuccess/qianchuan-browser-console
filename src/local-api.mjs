@@ -13,6 +13,7 @@ export function createLocalApi({db,token,allowedOrigins,getBrowserState,syncSnap
     if(!allowed)return json({error:'来源未授权'},403,headers);
     if(request.headers.get('Authorization')!==`Bearer ${token}`)return json({error:'本机会话无效，请重新启动执行器'},401,headers);
     const path=new URL(request.url).pathname;
+    if(request.method==='POST'&&(path==='/api/sync'||path==='/api/previews')&&await getBrowserState()==='login_required')return json({error:'千川登录已失效，请在专用浏览器中重新登录后再同步',live_writes:false},409,headers);
     if(request.method==='GET'&&path==='/api/state'){
       const execution=db.raw.prepare("SELECT value FROM settings WHERE key='execution'").get();
       const rules=db.raw.prepare('SELECT * FROM browser_rules ORDER BY updated_at DESC').all().map(rule=>({...rule,config:JSON.parse(rule.config_json)}));

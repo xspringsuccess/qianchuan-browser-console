@@ -58,3 +58,9 @@ test('unmet rules do not produce previews and enabled input cannot activate real
   await call('rules',{...rule,...rule.config,enabled:true});
   assert.equal(db.raw.prepare('SELECT enabled FROM browser_rules').get().enabled,0);db.raw.close();
 });
+test('login expiration returns an actionable error before attempting sync',async()=>{
+  const db=new LocalD1();let called=false;
+  const api=createLocalApi({db,token:'test',allowedOrigins:new Set(['https://xspringsuccess.github.io']),getBrowserState:async()=>'login_required',syncSnapshot:async()=>{called=true;}});
+  const response=await api(new Request('http://127.0.0.1:8798/api/sync',{method:'POST',headers:{Origin:'https://xspringsuccess.github.io',Authorization:'Bearer test'},body:'{}'}));
+  assert.equal(response.status,409);assert.match((await response.json()).error,/重新登录/);assert.equal(called,false);db.raw.close();
+});
