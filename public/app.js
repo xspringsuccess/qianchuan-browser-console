@@ -14,15 +14,26 @@ async function api(path,data){
 function disconnected(message='执行器尚未连接'){const action=token?'<button class="primary" data-action="connect">重新连接本机执行器</button>':'<button class="primary" disabled>请先启动本机执行器</button>';$('#content').innerHTML=`<div class="grid"><section class="panel"><h2>${esc(message)}</h2><p>请双击本机项目中的“启动千川网页执行器”，并使用它自动打开的新页面。直接打开本网址不会携带本机会话令牌。</p><div class="actions">${action}</div></section><section class="panel"><h2>隐私边界</h2><p>GitHub Pages 只提供静态界面。账户、规则、Cookie、验证码和执行记录全部保存在你的电脑。</p></section></div>`;}
 const money=value=>value==null?'--':`¥${Number(value).toLocaleString('zh-CN',{maximumFractionDigits:2})}`;
 const metric=value=>value==null?'--':Number(value).toFixed(2);
+const boardNames={overall:'乘方',universal:'全域',standard:'标准',brand:'品牌'};
+const homeSpendFields={overall:'overall_spend',universal:'universal_spend',standard:'standard_spend',brand:'brand_spend'};
+let planAccount='',planBoard='',planLimit=100;
 function render(){
   const rules=state.rules||[],accounts=state.accounts||[],plans=state.plans||[],evaluations=state.evaluations||[];
   const targetName=(scope,id)=>scope==='account'?(accounts.find(item=>item.account_id===id)?.label||`账户 ···${String(id).slice(-4)}`):(plans.find(item=>item.plan_id===id)?.name||`计划 ···${String(id).slice(-4)}`);
   const accountCards=accounts.length?accounts.map(item=>{
     const verified=item.metrics_scope==='whole_account';
-    const summary=verified?`今日消耗 ${money(item.spend)} · 预算使用率 ${metric(item.progress)}% · 净 ROI ${metric(item.net_roi)}`:`页面消耗 ${money(item.spend)} · 页面净 ROI ${metric(item.net_roi)}`;
-    return `<div class="device"><div class="device-head"><b>${esc(item.label)}</b><span class="badge ${verified?'green':'gray'}">${verified?'整账户口径':'统计口径待核实'}</span></div><small>日预算 ${money(item.budget)} · ${summary}</small></div>`;
+    const home=item.home_spend;
+    const summary=verified?`今日消耗 ${money(item.spend)} · 预算使用率 ${metric(item.progress)}% · 净 ROI ${metric(item.net_roi)}`:`首页整体消耗 ${money(home?.total_spend)}`;
+    const boardRows=Object.entries(boardNames).map(([key,label])=>{
+      const count=item.boards?.find(board=>board.board===key)?.plan_count;
+      const coverage=key==='standard'||key==='brand'?'计划入口待验证':count==null?'计划未读到':`本次读取 ${count} 条`;
+      return `<small>${label} · 首页消耗 ${money(home?.[homeSpendFields[key]])} · ${coverage}</small>`;
+    }).join('');
+    return `<div class="device"><div class="device-head"><b>${esc(item.label)}</b><span class="badge ${verified?'green':'gray'}">${verified?'整账户口径':'整账户 ROI 待核实'}</span></div><small>日预算 ${money(item.budget)} · ${summary}</small>${home?`<small>统计日 ${esc(home.report_date)} · 采集于 ${esc(new Date(home.captured_at).toLocaleTimeString('zh-CN'))}</small>`:''}${boardRows}</div>`;
   }).join(''):'<div class="empty">尚未同步账户数据。</div>';
-  const planCards=plans.length?plans.slice(0,100).map(item=>`<div class="device"><div class="device-head"><b>${esc(item.name)}</b><span class="badge ${item.budget_editable?'green':'gray'}">${item.budget_editable?'预算可编辑':'只读'}</span></div><small>${esc(accounts.find(account=>account.account_id===item.account_id)?.label||'千川账户')} · 预算 ${money(item.budget)} · 消耗 ${money(item.spend)} · 进度 ${metric(item.progress)}% · 净 ROI ${metric(item.net_roi)}</small></div>`).join(''):'<div class="empty">尚未同步计划数据。</div>';
+  const filteredPlans=plans.filter(item=>(!planAccount||item.account_id===planAccount)&&(!planBoard||item.board===planBoard));
+  const planFilters=`<div class="form-row"><label>账户<select id="plan-account"><option value="">全部账户</option>${accounts.map(item=>`<option value="${esc(item.account_id)}" ${item.account_id===planAccount?'selected':''}>${esc(item.label)}</option>`).join('')}</select></label><label>投放板块<select id="plan-board"><option value="">全部板块</option>${Object.entries(boardNames).map(([key,label])=>`<option value="${key}" ${key===planBoard?'selected':''}>${label}</option>`).join('')}</select></label></div>`;
+  const planCards=planFilters+(filteredPlans.length?filteredPlans.slice(0,planLimit).map(item=>`<div class="device"><div class="device-head"><b>${esc(item.name)}</b><span class="badge gray">${item.latest===0?'历史快照':esc(boardNames[item.board]||'板块待核实')}</span></div><small>${esc(accounts.find(account=>account.account_id===item.account_id)?.label||'千川账户')}${item.product_mode?` · ${esc(item.product_mode)}`:''} · 预算 ${money(item.budget)} · 消耗 ${money(item.spend)} · 净 ROI ${metric(item.net_roi)}</small></div>`).join(''):'<div class="empty">此范围没有已读取的计划。</div>')+(filteredPlans.length>planLimit?'<div class="actions"><button data-action="more-plans">显示更多计划</button></div>':'');
   const ruleCards=rules.length?rules.map(rule=>{
     const evaluation=evaluations.find(item=>item.rule_id===rule.id);
     const scopeUnverified=rule.target_scope==='account'&&accounts.find(item=>item.account_id===rule.target_id)?.metrics_scope!=='whole_account';
@@ -31,6 +42,10 @@ function render(){
     return `<div class="device"><div class="device-head"><b>${esc(rule.name)}</b><span class="badge ${matched?'green':'gray'}">${scopeUnverified?'统计口径待核实':matched?'预演命中':'未命中/未预演'}</span></div><small>${rule.target_scope==='account'?'账户':'计划'}：${esc(targetName(rule.target_scope,rule.target_id))}</small><small>进度 ≥ ${esc(rule.config.progress)}% · 净 ROI &gt; ${esc(rule.config.roi)} · 建议追加 ${money(rule.config.increment)}</small>${reason?`<small>${esc(reason)}</small>`:''}</div>`;
   }).join(''):'<div class="empty">尚无规则。当前只能保存未启用草稿，不会操作千川。</div>';
   $('#content').innerHTML=`<div class="grid"><section class="panel"><h2>本机执行器</h2><p>看板已通过一次性会话连接到本机；账户数据只写入本机 SQLite。</p><div class="status-row"><span>执行器连接</span><span class="badge green">在线</span></div><div class="status-row"><span>千川页面</span><span class="badge ${state.browser_state==='qianchuan_open'?'green':'gray'}">${esc(labels[state.browser_state]||state.browser_state)}</span></div><div class="status-row"><span>已同步账户 / 计划</span><span>${accounts.length} / ${plans.length}</span></div><div class="status-row"><span>真实网页写入</span><span class="badge gray">关闭</span></div><div class="actions"><button data-action="refresh">刷新界面</button><button class="primary" data-action="sync">同步只读数据</button><button data-action="new-rule" ${accounts.length||plans.length?'':'disabled'}>新增规则草稿</button></div></section><section class="panel"><h2>版本隔离</h2><p>本版本不使用 Cloudflare，不连接开放平台 API 版，也不读取 MCP Key、APP ID 或 OAuth Token。</p><div class="status-row"><span>网页托管</span><span>GitHub Pages</span></div><div class="status-row"><span>执行位置</span><span>你的电脑</span></div><div class="status-row"><span>规则模式</span><span>只读预演</span></div></section></div><section class="panel" style="margin-top:18px"><h2>账户快照</h2>${accountCards}</section><section class="panel" style="margin-top:18px"><h2>计划快照（最多显示 100 条）</h2>${planCards}</section><section class="panel" style="margin-top:18px"><h2>规则草稿与预演</h2>${ruleCards}</section>`;
+  $('#plan-account').closest('section').querySelector('h2').textContent=`计划快照（${filteredPlans.length} 条）`;
+  $('#plan-account').onchange=event=>{planAccount=event.target.value;planLimit=100;render();renderPreviews();};
+  $('#plan-board').onchange=event=>{planBoard=event.target.value;planLimit=100;render();renderPreviews();};
+  $('[data-action="more-plans"]')?.addEventListener('click',()=>{planLimit+=100;render();renderPreviews();});
 }
 function renderPreviews(){
   if(state.browser_state==='login_required')$('#content').insertAdjacentHTML('afterbegin','<section class="panel spaced"><h2>请先登录千川</h2><p>请在本机执行器打开的千川标签页完成登录，再点击“同步只读数据”。下方账户及计划为此前保存的快照。</p></section>');

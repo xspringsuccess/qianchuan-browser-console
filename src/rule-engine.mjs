@@ -23,5 +23,5 @@ export function evaluateRule(rule,target,now=Date.now()){
 }
 
 export function findRuleTarget(db,rule){
-  return rule.target_scope==='account'?db.raw.prepare('SELECT * FROM browser_accounts_with_scope WHERE account_id=?').get(rule.target_id):db.raw.prepare('SELECT * FROM browser_plans WHERE plan_id=?').get(rule.target_id);
+  return rule.target_scope==='account'?db.raw.prepare('SELECT * FROM browser_accounts_with_scope WHERE account_id=?').get(rule.target_id):db.raw.prepare('SELECT p.* FROM browser_plans p JOIN browser_accounts a USING(account_id) WHERE p.plan_id=? AND p.captured_at=a.captured_at').get(rule.target_id);
 }

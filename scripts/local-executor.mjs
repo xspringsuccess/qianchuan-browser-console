@@ -10,7 +10,7 @@ import { createLocalApi } from '../src/local-api.mjs';
 import { collectQianchuanSnapshots } from '../src/qianchuan-collector.mjs';
 import { evaluateRule } from '../src/rule-engine.mjs';
 
-const VERSION='0.4.0',root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
+const VERSION='0.5.0',root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const localDir=resolve(root,'.local');
 const browserDataRoot=resolve(process.env.LOCALAPPDATA||localDir,'QianchuanBrowserConsole');
 let profileDir;
@@ -35,7 +35,16 @@ async function syncSnapshot(){
   const snapshots=await collectQianchuanSnapshots(debugPort),rules=db.raw.prepare('SELECT * FROM browser_rules').all(),now=new Date().toISOString();
   db.raw.exec('BEGIN');
   try{
-    for(const snapshot of snapshots){const account=snapshot.account;db.raw.prepare('INSERT INTO browser_accounts(account_id,label,budget,spend,net_roi,progress,delivery_status,captured_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET label=excluded.label,budget=excluded.budget,spend=excluded.spend,net_roi=excluded.net_roi,progress=excluded.progress,delivery_status=excluded.delivery_status,captured_at=excluded.captured_at').run(account.account_id,account.label,account.budget,account.spend,account.net_roi,account.progress,account.delivery_status,account.captured_at);db.raw.prepare('DELETE FROM browser_plans WHERE account_id=?').run(account.account_id);for(const plan of snapshot.plans)db.raw.prepare('INSERT INTO browser_plans(plan_id,account_id,name,budget,spend,net_roi,progress,status,budget_editable,status_editable,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(plan.plan_id,plan.account_id,plan.name,plan.budget,plan.spend,plan.net_roi,plan.progress,plan.status,plan.budget_editable,plan.status_editable,plan.captured_at);}
+    for(const {account,home_spend:home,boards,plans} of snapshots){
+      db.raw.prepare('INSERT INTO browser_accounts(account_id,label,budget,spend,net_roi,progress,delivery_status,captured_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET label=excluded.label,budget=excluded.budget,spend=excluded.spend,net_roi=excluded.net_roi,progress=excluded.progress,delivery_status=excluded.delivery_status,captured_at=excluded.captured_at').run(account.account_id,account.label,account.budget,account.spend,account.net_roi,account.progress,account.delivery_status,account.captured_at);
+      if(home)db.raw.prepare('INSERT INTO browser_home_spend VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET report_date=excluded.report_date,captured_at=excluded.captured_at,total_spend=excluded.total_spend,overall_spend=excluded.overall_spend,standard_spend=excluded.standard_spend,universal_spend=excluded.universal_spend,brand_spend=excluded.brand_spend').run(account.account_id,home.report_date,home.captured_at,home.total_spend,home.overall_spend,home.standard_spend,home.universal_spend,home.brand_spend);
+      for(const item of boards)db.raw.prepare('INSERT INTO browser_board_reads VALUES(?,?,?,?) ON CONFLICT(account_id,board) DO UPDATE SET captured_at=excluded.captured_at,plan_count=excluded.plan_count').run(account.account_id,item.board,account.captured_at,item.plan_count);
+      for(const plan of plans){
+        const saved=db.raw.prepare(`INSERT INTO browser_plans(plan_id,account_id,name,budget,spend,net_roi,progress,status,budget_editable,status_editable,captured_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+          ON CONFLICT(plan_id) DO UPDATE SET name=excluded.name,budget=excluded.budget,spend=excluded.spend,net_roi=excluded.net_roi,progress=excluded.progress,status=excluded.status,budget_editable=excluded.budget_editable,status_editable=excluded.status_editable,captured_at=excluded.captured_at WHERE browser_plans.account_id=excluded.account_id`).run(plan.plan_id,plan.account_id,plan.name,plan.budget,plan.spend,plan.net_roi,plan.progress,plan.status,plan.budget_editable,plan.status_editable,plan.captured_at);
+        if(saved.changes)db.raw.prepare('INSERT INTO browser_plan_sources VALUES(?,?,?,?) ON CONFLICT(plan_id) DO UPDATE SET board=excluded.board,product_mode=excluded.product_mode,captured_at=excluded.captured_at').run(plan.plan_id,plan.board,plan.product_mode,plan.captured_at);
+      }
+    }
     for(const rule of rules){const target=rule.target_scope==='account'?snapshots.map(item=>item.account).find(item=>item.account_id===rule.target_id):snapshots.flatMap(item=>item.plans).find(item=>item.plan_id===rule.target_id),evaluation=evaluateRule(rule,target);db.raw.prepare('INSERT INTO browser_rule_evaluations(id,rule_id,target_scope,target_id,matched,reason,proposed_action,created_at) VALUES(?,?,?,?,?,?,?,?)').run(crypto.randomUUID(),rule.id,rule.target_scope,rule.target_id,evaluation.matched?1:0,evaluation.reason,evaluation.proposed_action?JSON.stringify(evaluation.proposed_action):null,now);}
     db.raw.prepare('DELETE FROM browser_rule_evaluations WHERE id NOT IN (SELECT id FROM browser_rule_evaluations ORDER BY created_at DESC LIMIT 200)').run();db.raw.exec('COMMIT');
   }catch(error){db.raw.exec('ROLLBACK');throw error;}

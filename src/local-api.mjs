@@ -18,8 +18,17 @@ export function createLocalApi({db,token,allowedOrigins,getBrowserState,syncSnap
       const execution=db.raw.prepare("SELECT value FROM settings WHERE key='execution'").get();
       const rules=db.raw.prepare('SELECT * FROM browser_rules ORDER BY updated_at DESC').all().map(rule=>({...rule,config:JSON.parse(rule.config_json)}));
       const recent=db.raw.prepare('SELECT * FROM browser_actions ORDER BY created_at DESC LIMIT 50').all();
-      const accounts=db.raw.prepare('SELECT * FROM browser_accounts_with_scope ORDER BY captured_at DESC').all();
-      const plans=db.raw.prepare('SELECT * FROM browser_plans ORDER BY account_id,name').all();
+      const homeSpend=db.raw.prepare('SELECT * FROM browser_home_spend').all();
+      const boardReads=db.raw.prepare('SELECT * FROM browser_board_reads').all();
+      const accounts=db.raw.prepare('SELECT * FROM browser_accounts_with_scope ORDER BY captured_at DESC').all().map(account=>({
+        ...account,
+        home_spend:homeSpend.find(row=>row.account_id===account.account_id&&row.captured_at===account.captured_at)||null,
+        boards:boardReads.filter(row=>row.account_id===account.account_id&&row.captured_at===account.captured_at)
+      }));
+      const plans=db.raw.prepare(`SELECT p.*,s.board,s.product_mode,a.captured_at=p.captured_at AS latest
+        FROM browser_plans p JOIN browser_accounts a USING(account_id)
+        LEFT JOIN browser_plan_sources s ON p.plan_id=s.plan_id AND p.captured_at=s.captured_at
+        ORDER BY latest DESC,p.account_id,p.name`).all();
       const evaluations=db.raw.prepare('SELECT * FROM browser_rule_evaluations ORDER BY created_at DESC LIMIT 100').all().map(item=>{
         const account=accounts.find(account=>account.account_id===item.target_id);
         if(item.target_scope==='account'&&account?.metrics_scope!=='whole_account')return {...item,matched:0,reason:ACCOUNT_SCOPE_UNVERIFIED,proposed_action:null};

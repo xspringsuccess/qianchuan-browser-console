@@ -1,53 +1,167 @@
 import { CdpClient } from '../scripts/cdp.mjs';
 
+const origin='https://qianchuan.jinritemai.com';
 const sleep=ms=>new Promise(done=>setTimeout(done,ms));
-const watchedPath=/daily-budget\/get-account-budget|uni-promotion\/ad\/list-required|data\/v1\/common\/statQuery/;
-const number=value=>{if(value===null||value===undefined||typeof value==='boolean'||typeof value==='string'&&!value.trim())return null;const parsed=Number(value);return Number.isFinite(parsed)?parsed:null;};
+const today=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format();
+const number=value=>value==null||!['string','number'].includes(typeof value)||String(value).trim()===''||!Number.isFinite(Number(value))?null:Number(value);
 const yuan=value=>{const parsed=number(value);return parsed===null?null:parsed/100000;};
 const metric=(metrics,key)=>number(metrics?.[key]?.value??metrics?.[key]?.Value);
+const dateOf=value=>{
+  if(typeof value==='string'&&/^\d{4}-\d\d-\d\d/.test(value))return value.slice(0,10);
+  if(/^\d{10}(?:\d{3})?$/.test(String(value)))return new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(Number(value)*(String(value).length===10?1000:1)));
+  return null;
+};
+const homeLabels={total_spend:'账户整体',overall_spend:'乘方计划',standard_spend:'标准投放',universal_spend:'全域投放',brand_spend:'品牌投放'};
+const homeDatasets=new Set(['home_cost_total_prom','overall_home_cost_total_prom']);
+const boards={overall:'/overall-prom',universal:'/uni-prom'};
+const pageLimit=25;
 
-async function targets(debugPort){return await (await fetch(`http://127.0.0.1:${debugPort}/json/list`)).json();}
-async function ensurePlanTarget(debugPort,accountId){let list=await targets(debugPort),page=list.find(target=>target.type==='page'&&new URL(target.url).hostname==='qianchuan.jinritemai.com'&&new URL(target.url).pathname==='/overall-prom');if(page)return page;const url=`https://qianchuan.jinritemai.com/overall-prom?aavid=${encodeURIComponent(accountId)}`;await fetch(`http://127.0.0.1:${debugPort}/json/new?${encodeURIComponent(url)}`,{method:'PUT'});await sleep(1500);list=await targets(debugPort);page=list.find(target=>target.type==='page'&&new URL(target.url).pathname==='/overall-prom');if(!page)throw new Error('无法打开千川计划页');return page;}
-
-function buildSnapshot(accountId,responses){
-  const capturedAt=new Date().toISOString();
-  const budgetBody=responses.find(item=>item.path.endsWith('/daily-budget/get-account-budget'))?.body;
-  const accountBudget=budgetBody?.data?.accountBudget||{};
-  const statBodies=responses.filter(item=>item.path.endsWith('/data/v1/common/statQuery')).map(item=>item.body?.data?.StatsData?.Totals).filter(Boolean);
-  const accountTotals=statBodies.find(totals=>totals.total_prepay_and_pay_settle_overall_roi2_1h&&totals.stat_cost_for_overall_roi2)||{};
-  const budget=yuan(accountBudget.budget),spend=metric(accountTotals,'stat_cost_for_overall_roi2'),netRoi=metric(accountTotals,'total_prepay_and_pay_settle_overall_roi2_1h');
-  const account={account_id:accountId,label:`千川账户 ···${accountId.slice(-4)}`,budget,spend,net_roi:netRoi,progress:budget&&spend!==null?spend/budget*100:null,delivery_status:String(accountBudget.deliveryStatus??''),captured_at:capturedAt};
-  const plans=new Map();
-  for(const response of responses.filter(item=>item.path.endsWith('/uni-promotion/ad/list-required'))){
-    const data=response.body?.data||{};
-    for(const info of data.adInfos||[]){
-      const id=String(info.id),current=plans.get(id)||{info:null,metrics:{}};
-      current.info={...(current.info||{}),...info};
-      const nextMetrics=data.adStatsMap?.[id]?.metrics||{};
-      if(Object.keys(nextMetrics).length>Object.keys(current.metrics).length)current.metrics=nextMetrics;
-      plans.set(id,current);
-    }
-  }
-  return {account,plans:[...plans].map(([id,item])=>{const info=item.info||{},metrics=item.metrics||{},planBudget=yuan(info.budget),planSpend=metric(metrics,'statCostForOverallRoi2')??metric(metrics,'statCostForRoi2'),planRoi=metric(metrics,'totalPrepayAndPaySettleOverallRoi21H');return {plan_id:id,account_id:accountId,name:String(info.name||`计划 ···${id.slice(-4)}`),budget:planBudget,spend:planSpend,net_roi:planRoi,progress:planBudget&&planSpend!==null?planSpend/planBudget*100:null,status:String(info.adOptType??info.adDeliveryType??''),budget_editable:info.operation?.budgetEditOperation?.editable?1:0,status_editable:info.operation?.optStatusOperation?.editable?1:0,captured_at:capturedAt};})};
+export function parseHomeSpend(text){
+  const lines=text.split(/\r?\n/).map(line=>line.trim());
+  return Object.fromEntries(Object.entries(homeLabels).map(([key,label])=>{
+    const index=lines.findIndex(line=>line===`${label}消耗(元)`||line===`${label}消耗（元）`);
+    if(index<0)return [key,null];
+    const whole=lines[index+1]||'',fraction=lines[index+2]||'';
+    if(!/^\d[\d,]*(?:\.\d{1,2})?$/.test(whole))return [key,null];
+    const value=/^\.\d{2}$/.test(fraction)&&!whole.includes('.')?whole+fraction:whole;
+    return [key,number(value.replaceAll(',',''))];
+  }));
 }
 
-async function captureAccount(debugPort,page,accountId){
-  const client=await new CdpClient(page.webSocketDebuggerUrl).connect(),requests=new Map(),responses=[],bodyTasks=[];
-  client.on('Network.requestWillBeSent',event=>{try{const url=new URL(event.request.url);if(url.hostname==='qianchuan.jinritemai.com'&&watchedPath.test(url.pathname))requests.set(event.requestId,url.pathname);}catch{}});
-  client.on('Network.loadingFinished',event=>{const path=requests.get(event.requestId);if(!path)return;bodyTasks.push(client.send('Network.getResponseBody',{requestId:event.requestId}).then(result=>{try{responses.push({path,body:JSON.parse(result.body)});}catch{}}).catch(()=>{}));});
-  await client.send('Network.enable');
-  await client.send('Page.navigate',{url:`https://qianchuan.jinritemai.com/overall-prom?aavid=${encodeURIComponent(accountId)}`});
-  await sleep(5000);
-  const point=await client.evaluate(`(()=>{const node=[...document.querySelectorAll('[role=tab]')].find(item=>(item.innerText||item.textContent||'').trim()==='商品自选');if(!node)return null;const rect=node.getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()`);
-  if(point){await client.send('Input.dispatchMouseEvent',{type:'mousePressed',x:point.x,y:point.y,button:'left',clickCount:1});await client.send('Input.dispatchMouseEvent',{type:'mouseReleased',x:point.x,y:point.y,button:'left',clickCount:1});}
-  await sleep(7000);await Promise.allSettled(bodyTasks);client.close();
-  return buildSnapshot(accountId,responses);
+async function devtools(debugPort,path,method='GET'){
+  const response=await fetch(`http://127.0.0.1:${debugPort}${path}`,{method,signal:AbortSignal.timeout(5000)});
+  if(!response.ok)throw new Error('专用浏览器暂时无法读取');
+  return response;
+}
+
+function productMode(board,dataset){
+  if(board==='overall'&&/^overall_roi_unishop_promotion_list_for_product(?:_v2)?$/.test(dataset))return '全店托管';
+  if(board==='overall'&&/^overall_roi_promotion_list_for_product(?:_v2)?$/.test(dataset))return '商品自选';
+  if(board==='universal'&&dataset==='site_promotion_allshop_list')return '全店托管';
+  if(board==='universal'&&dataset==='product_roi2_promotion')return '商品自选';
+  return null;
+}
+
+function boardPlans(accountId,board,responses,capturedAt,reportDate){
+  const plans=new Map();
+  let read=false;
+  for(const {body,dataset,start,end} of responses){
+    const mode=productMode(board,dataset);
+    if(!mode||dateOf(start)!==reportDate||dateOf(end)!==reportDate||!Array.isArray(body.data?.adInfos))continue;
+    read=true;
+    for(const info of body.data.adInfos){
+      if(info.id==null||typeof info.id==='number'&&!Number.isSafeInteger(info.id))continue;
+      const id=String(info.id),previous=plans.get(id);
+      const metrics=body.data.adStatsMap?.[id]?.metrics||{};
+      const spend=metric(metrics,board==='overall'?'statCostForOverallRoi2':'statCostForRoi2');
+      const roi=metric(metrics,board==='overall'?'totalPrepayAndPaySettleOverallRoi21H':'totalPrepayAndPaySettleRoi21H');
+      const budget=yuan(info.budget)??previous?.budget??null;
+      // A spend and ROI pair must come from the same metric response.
+      const pair=spend!==null&&roi!==null?{spend,roi}:previous?.net_roi!=null?{spend:previous.spend,roi:previous.net_roi}:{spend:spend??metric(metrics,'statCostForRoi2')??previous?.spend??null,roi:null};
+      const product_mode=previous&&previous.product_mode!==mode?null:mode;
+      plans.set(id,{plan_id:id,account_id:accountId,name:String(info.name??previous?.name??`计划 ···${id.slice(-4)}`),budget,spend:pair.spend,net_roi:pair.roi,progress:budget>0&&pair.spend!==null?pair.spend/budget*100:null,status:String(info.adOptType??info.adDeliveryType??previous?.status??''),budget_editable:info.operation?.budgetEditOperation?Number(Boolean(info.operation.budgetEditOperation.editable)):previous?.budget_editable??0,status_editable:info.operation?.optStatusOperation?Number(Boolean(info.operation.optStatusOperation.editable)):previous?.status_editable??0,captured_at:capturedAt,board,product_mode});
+    }
+  }
+  return {board,plan_count:read?plans.size:null,plans:[...plans.values()]};
+}
+
+async function readNextPage(client,board,accountId){
+  return client.evaluate(`(() => {
+    const url=new URL(location.href);
+    if(url.origin!==${JSON.stringify(origin)}||url.pathname!==${JSON.stringify(boards[board])}||url.searchParams.get('aavid')!==${JSON.stringify(accountId)})return null;
+    const visible=node=>node.getClientRects().length>0;
+    const overall=${board==='overall'};
+    const pagination=[...document.querySelectorAll(overall?'.aurora-qc-pagination':'.ovui-pagination')].filter(visible);
+    if(pagination.length!==1)return null;
+    const scope=pagination[0];
+    const active=scope.querySelector(overall?'.aurora-qc-pagination-item-active':'.ovui-page-turner__item--active');
+    const page=Number(active?.textContent.trim());
+    if(!Number.isInteger(page)||page<1)return null;
+    const next=overall?scope.querySelector('[title="下一页"]'):[...scope.querySelectorAll('li.ovui-page-turner__item')].at(-1);
+    if(!next||!visible(next)||next.getAttribute('aria-disabled')==='true'||/disabled/.test(next.className))return null;
+    if(!overall&&(next.textContent.trim()||!next.querySelector('svg')))return null;
+    next.click();return page+1;
+  })()`);
+}
+
+async function readPage(client,accountId,path,board){
+  const requests=new Map(),responses=[],pending=[];
+  const offRequest=client.on('Network.requestWillBeSent',event=>{
+    try{
+      const url=new URL(event.request.url);
+      if(url.origin!==origin||!/\/get-account-budget$|\/statQuery$|\/ad\/list-required$/.test(url.pathname))return;
+      const body=JSON.parse(event.request.postData||'{}');
+      const requestAccount=body.aavid??url.searchParams.get('aavid');
+      if(requestAccount!=null&&String(requestAccount)!==accountId)return;
+      const params=body.Params||body,range=params.AdFilter?.DataTimeRange||params;
+      requests.set(event.requestId,{path:url.pathname,dataset:body.DataSetKey??params.SophonxDataSetKey??params.dataSetKey??'',start:range.StartTime??range.start_time,end:range.EndTime??range.end_time,page:Number(params.PageParams?.Page??params.page)});
+    }catch{}
+  });
+  const offResponse=client.on('Network.loadingFinished',event=>{
+    const request=requests.get(event.requestId);
+    if(request)pending.push(client.send('Network.getResponseBody',{requestId:event.requestId}).then(result=>responses.push({...request,body:JSON.parse(result.body)})).catch(()=>{}));
+  });
+  try{
+    const url=new URL(path,origin);url.searchParams.set('aavid',accountId);
+    await client.send('Page.navigate',{url:url.href});
+    await sleep(6500);
+    const page=await client.evaluate('({url:location.href,text:document.body?.innerText||""})');
+    const current=new URL(page.url);
+    if(current.origin!==origin||current.pathname!==path||current.searchParams.get('aavid')!==accountId)return {text:'',responses:[]};
+    await Promise.allSettled(pending);
+    if(board){
+      for(let i=1;i<pageLimit;i++){
+        const before=responses.length;
+        const next=await readNextPage(client,board,accountId);
+        if(!next)break;
+        const end=Date.now()+4000;
+        while(Date.now()<end&&!responses.slice(before).some(r=>r.page===next&&productMode(board,r.dataset)&&r.body.data?.adInfos?.length))await sleep(180);
+        if(!responses.slice(before).some(r=>r.page===next&&productMode(board,r.dataset)&&r.body.data?.adInfos?.length))break;
+        await sleep(450);
+      }
+      await Promise.allSettled(pending);
+    }
+    return {text:page.text,responses};
+  }finally{offRequest();offResponse();}
+}
+
+async function captureAccount(client,accountId){
+  const reportDate=today();
+  const home=await readPage(client,accountId,'/home');
+  const sources=new Set(home.responses.filter(r=>homeDatasets.has(r.dataset)&&dateOf(r.start)===reportDate&&dateOf(r.end)===reportDate&&r.body.data?.StatsData).map(r=>r.dataset));
+  const homeSpend=sources.size===homeDatasets.size?parseHomeSpend(home.text):null;
+  const reads=[],responses=[...home.responses];
+  // Query both known boards even at zero spend so plans that have yet to spend are visible.
+  for(const [board,path] of Object.entries(boards)){
+    const result=await readPage(client,accountId,path,board);
+    reads.push({board,responses:result.responses});
+    responses.push(...result.responses);
+  }
+  const capturedAt=new Date().toISOString();
+  const accountBudget=responses.find(r=>r.path.endsWith('/get-account-budget')&&r.body.data?.accountBudget)?.body.data.accountBudget||{};
+  const budget=yuan(accountBudget.budget);
+  const account={account_id:accountId,label:`千川账户 ···${accountId.slice(-4)}`,budget,spend:null,net_roi:null,progress:null,delivery_status:String(accountBudget.deliveryStatus??''),captured_at:capturedAt};
+  const boardReads=reads.map(({board,responses})=>boardPlans(accountId,board,responses,capturedAt,reportDate));
+  const counts=new Map();
+  for(const plan of boardReads.flatMap(item=>item.plans))counts.set(plan.plan_id,(counts.get(plan.plan_id)||0)+1);
+  const plans=boardReads.flatMap(item=>item.plans).filter(plan=>counts.get(plan.plan_id)===1);
+  return {account,home_spend:homeSpend&&{...homeSpend,report_date:reportDate,captured_at:capturedAt},boards:boardReads.map(item=>({board:item.board,plan_count:item.plan_count===null?null:item.plans.filter(plan=>counts.get(plan.plan_id)===1).length})),plans};
 }
 
 export async function collectQianchuanSnapshots(debugPort){
-  const list=await targets(debugPort),accountIds=[...new Set(list.filter(target=>target.type==='page'&&new URL(target.url).hostname==='qianchuan.jinritemai.com').map(target=>new URL(target.url).searchParams.get('aavid')).filter(Boolean))];
+  const tabs=await(await devtools(debugPort,'/json/list')).json();
+  const accountIds=[...new Set(tabs.filter(tab=>tab.type==='page'&&URL.canParse(tab.url)&&new URL(tab.url).origin===origin).map(tab=>new URL(tab.url).searchParams.get('aavid')).filter(id=>/^\d+$/.test(id||'')))];
   if(!accountIds.length)throw new Error('未检测到已登录的千川账户页');
-  const page=await ensurePlanTarget(debugPort,accountIds[0]),snapshots=[];
-  for(const accountId of accountIds)snapshots.push(await captureAccount(debugPort,page,accountId));
-  return snapshots;
+  const tab=await(await devtools(debugPort,'/json/new?about:blank','PUT')).json();
+  let client;
+  try{
+    client=await new CdpClient(tab.webSocketDebuggerUrl).connect();
+    await client.send('Network.enable');
+    const snapshots=[];
+    for(const accountId of accountIds)snapshots.push(await captureAccount(client,accountId));
+    return snapshots;
+  }finally{
+    client?.close();
+    await devtools(debugPort,`/json/close/${tab.id}`).catch(()=>{});
+  }
 }
