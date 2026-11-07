@@ -33,7 +33,15 @@ function showActiveTab(){
 function render(){
   const rules=state.rules||[],accounts=state.accounts||[],plans=state.plans||[],evaluations=state.evaluations||[];
   const targetName=(scope,id)=>scope==='account'?(accounts.find(item=>item.account_id===id)?.label||`账户 ···${String(id).slice(-4)}`):(plans.find(item=>item.plan_id===id)?.name||`计划 ···${String(id).slice(-4)}`);
-  const accountCards=accounts.length?accounts.map(item=>{
+  const sortedAccounts=[...accounts].sort((left,right)=>{
+    const leftSpend=left.home_spend?.total_spend??left.spend;
+    const rightSpend=right.home_spend?.total_spend??right.spend;
+    if(leftSpend==null&&rightSpend==null)return left.label.localeCompare(right.label,'zh-CN');
+    if(leftSpend==null)return 1;
+    if(rightSpend==null)return -1;
+    return Number(rightSpend)-Number(leftSpend)||left.label.localeCompare(right.label,'zh-CN');
+  });
+  const accountCards=sortedAccounts.length?sortedAccounts.map(item=>{
     const verified=item.metrics_scope==='whole_account';
     const home=item.home_spend;
     const boardRows=Object.entries(boardNames).map(([key,label])=>{
